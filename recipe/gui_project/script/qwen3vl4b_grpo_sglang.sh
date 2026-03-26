@@ -19,6 +19,7 @@ EXPERIMENT_NAME=${DATE}-qwen3_vl_4b_ui_agile_sglang
 
 TRAIN_FILE=dataset/ui_agile_grounding/data_process_2/train.parquet
 VAL_FILE=dataset/screenspot_pro_grounding/data_process_2/val_500.parquet
+# VAL_FILE='[dataset/screenspot_pro_grounding/data_process_2/val_500.parquet,dataset/another_eval/data_process/val.parquet]'
 
 REWARD_FUNCTION_PATH=recipe/gui_project/reward/in_box_reward.py
 REWARD_FUNCTION_NAME=compute_score
