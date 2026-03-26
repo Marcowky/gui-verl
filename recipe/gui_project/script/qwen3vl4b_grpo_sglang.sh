@@ -15,12 +15,12 @@ GPU_NUMS=4
 MODEL_PATH=/home/kaiyu/Model/Qwen/Qwen3-VL-4B-Instruct
 
 PROJECT_NAME=gui_rlvr_baseline
-EXPERIMENT_NAME=${DATE}-qwen3_vl_4b_ui_agile
+EXPERIMENT_NAME=${DATE}-qwen3_vl_4b_ui_agile_sglang
 
 TRAIN_FILE=dataset/ui_agile_grounding/data_process_2/train.parquet
 VAL_FILE=dataset/screenspot_pro_grounding/data_process_2/val_500.parquet
 
-REWARD_FUNCTION_PATH=recipe/gui_rlvr_baseline/reward_fn.py
+REWARD_FUNCTION_PATH=recipe/gui_project/reward/in_box_reward.py
 REWARD_FUNCTION_NAME=compute_score
 
 SAVE_CHECKPOINT_PATH=checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}
@@ -62,9 +62,9 @@ PYTHONUNBUFFERED=1 python -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.max_num_batched_tokens=8192 \
     actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
-    actor_rollout_ref.rollout.name=vllm \
-    +actor_rollout_ref.rollout.engine_kwargs.vllm.disable_mm_preprocessor_cache=True \
+    actor_rollout_ref.rollout.name=sglang \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.6 \
+    actor_rollout_ref.rollout.multi_stage_wake_up=True \
     actor_rollout_ref.rollout.n=8 \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \

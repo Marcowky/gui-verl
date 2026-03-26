@@ -1,4 +1,4 @@
-from recipe.gui_rlvr_baseline.qwen3vl_utils import extract_point_from_response
+from recipe.gui_project.model.qwen3vl_utils import extract_point_from_response
 
 
 def is_point_in_bbox(point: list[float] | None, bbox_xyxy_normalized: dict[str, float]) -> bool:

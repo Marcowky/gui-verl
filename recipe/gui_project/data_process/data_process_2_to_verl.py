@@ -4,7 +4,7 @@ import os
 import datasets
 from pathlib import Path
 
-from recipe.gui_rlvr_baseline.qwen3vl_utils import build_prompt_messages, normalize_bbox_xyxy
+from recipe.gui_project.model.qwen3vl_utils import build_prompt_messages, normalize_bbox_xyxy
 
 
 def parse_args():
