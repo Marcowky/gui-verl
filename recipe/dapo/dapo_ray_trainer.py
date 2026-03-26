@@ -162,6 +162,7 @@ class RayDAPOTrainer(RayPPOTrainer):
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
+                val_metrics = {}
 
                 with marked_timer("start_profile", timing_raw):
                     self._start_profiling(
@@ -405,6 +406,11 @@ class RayDAPOTrainer(RayPPOTrainer):
                 ):
                     with marked_timer("save_checkpoint", timing_raw, "green"):
                         self._save_checkpoint()
+                    checkpoint_saved_this_step = True
+                else:
+                    checkpoint_saved_this_step = False
+
+                checkpoint_saved_this_step = self._maybe_save_best_checkpoint(val_metrics, checkpoint_saved_this_step)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (
