@@ -26,7 +26,8 @@ BEST_CKPT_METRIC="val-core/screenspot_pro_grounding/reward/mean@1"
 REWARD_FUNCTION_PATH=recipe/gui_project/reward/in_box_reward.py
 REWARD_FUNCTION_NAME=compute_score
 
-SAVE_CHECKPOINT_PATH=checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}
+SAVE_CHECKPOINT_PATH=checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME} # normal
+# SAVE_CHECKPOINT_PATH=/mnt/HDD_4TB/kaiyu/Project/gui-project/gui-verl/checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME} # for 68 server
 ROLL_OUT_DATA_DIR=${SAVE_CHECKPOINT_PATH}/rollout_data
 VAL_DATA_DIR=${SAVE_CHECKPOINT_PATH}/validation_data
 
