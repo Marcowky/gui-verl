@@ -47,6 +47,34 @@ class RayDAPOTrainer(RayPPOTrainer):
     Note that this trainer runs on the driver process on a single CPU/GPU node.
     """
 
+    @staticmethod
+    def _align_reward_extra_infos_for_logging(batch: DataProto, reward_extra_infos_dict: dict) -> dict:
+        """Rebuild reward extra infos from the final batch after DAPO filtering.
+
+        DAPO may filter or concatenate rollout batches after reward computation, which can make the original
+        ``reward_extra_infos_dict`` length mismatch the final ``batch`` used for rollout dumping. GRPO logs from the
+        final batch, so here we mirror that behavior by pulling the same keys back from ``batch.non_tensor_batch``.
+        """
+        if not reward_extra_infos_dict:
+            return {}
+
+        aligned_reward_extra_infos_dict = {}
+        batch_size = len(batch)
+        for key in reward_extra_infos_dict:
+            if key not in batch.non_tensor_batch:
+                continue
+
+            values = batch.non_tensor_batch[key]
+            if hasattr(values, "tolist"):
+                values = values.tolist()
+            elif not isinstance(values, list):
+                values = list(values)
+
+            if len(values) == batch_size:
+                aligned_reward_extra_infos_dict[key] = values
+
+        return aligned_reward_extra_infos_dict
+
     def compute_kl_related_metrics(self, batch: DataProto, metrics: dict, timing_raw: dict):
         batch.batch["response_mask"] = compute_response_mask(batch)
 
@@ -355,7 +383,10 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # Log rollout generations if enabled
                     rollout_data_dir = self.config.trainer.get("rollout_data_dir", None)
                     if rollout_data_dir:
-                        self._log_rollout_data(batch, reward_extra_infos_dict, timing_raw, rollout_data_dir)
+                        reward_extra_infos_to_dump = self._align_reward_extra_infos_for_logging(
+                            batch, reward_extra_infos_dict
+                        )
+                        self._log_rollout_data(batch, reward_extra_infos_to_dump, timing_raw, rollout_data_dir)
 
                 # validate
                 if (

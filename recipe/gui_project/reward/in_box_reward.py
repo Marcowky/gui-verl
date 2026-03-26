@@ -34,6 +34,7 @@ def compute_score(
             "pred_y": -1.0,
             "parse_error": parsed["parse_error"] or "unknown",
             "img_filename": extra_info.get("img_filename", ""),
+            "index": str(extra_info.get("index", -1)),
         }
 
     in_box = float(is_point_in_bbox(point, ground_truth))
@@ -47,4 +48,5 @@ def compute_score(
         "pred_y": float(point[1]),
         "parse_error": "",
         "img_filename": extra_info.get("img_filename", ""),
+        "index": str(extra_info.get("index", -1)),
     }
