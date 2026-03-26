@@ -20,6 +20,7 @@ This trainer supports model-agonistic model initialization with huggingface
 
 import json
 import os
+import shutil
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -329,6 +330,9 @@ class RayPPOTrainer:
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+        self.best_ckpt_dir = os.path.join(self.config.trainer.default_local_dir, "best_checkpoints")
+        self.best_ckpt_metadata_path = os.path.join(self.best_ckpt_dir, "metadata.json")
+        self.best_ckpt_records = self._load_best_checkpoint_metadata()
 
         # if ref_in_actor is True, the reference policy will be actor without lora applied
         self.ref_in_actor = (
@@ -834,6 +838,151 @@ class RayPPOTrainer:
         with open(local_latest_checkpointed_iteration, "w") as f:
             f.write(str(self.global_steps))
 
+    def _load_best_checkpoint_metadata(self) -> list[dict]:
+        if not os.path.exists(self.best_ckpt_metadata_path):
+            return []
+
+        try:
+            with open(self.best_ckpt_metadata_path) as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            print(f"Warning: Failed to load best checkpoint metadata from {self.best_ckpt_metadata_path}: {exc}")
+            return []
+
+        records = payload.get("records", [])
+        normalized_records = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            path = record.get("path")
+            if not isinstance(path, str) or not os.path.exists(path):
+                continue
+            try:
+                normalized_records.append(
+                    {
+                        "step": int(record["step"]),
+                        "score": float(record["score"]),
+                        "metric_name": str(record["metric_name"]),
+                        "path": path,
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+
+        return normalized_records
+
+    def _write_best_checkpoint_metadata(self) -> None:
+        os.makedirs(self.best_ckpt_dir, exist_ok=True)
+        payload = {
+            "mode": self.config.trainer.get("best_ckpt_mode", "max"),
+            "records": self.best_ckpt_records,
+        }
+        with open(self.best_ckpt_metadata_path, "w") as f:
+            json.dump(payload, f, indent=2)
+
+    def _sort_best_checkpoint_records(self, records: list[dict]) -> list[dict]:
+        mode = self.config.trainer.get("best_ckpt_mode", "max")
+        if mode == "min":
+            return sorted(records, key=lambda record: (record["score"], -record["step"]))
+        return sorted(records, key=lambda record: (-record["score"], -record["step"]))
+
+    def _resolve_best_checkpoint_metric(self, val_metrics: dict) -> tuple[str, float] | None:
+        monitor = self.config.trainer.get("best_ckpt_metric", "auto")
+
+        if isinstance(monitor, str) and monitor not in {"", "auto"}:
+            metric_val = val_metrics.get(monitor)
+            if metric_val is None:
+                print(f"Warning: best checkpoint metric {monitor} not found in validation metrics, skip saving best ckpt")
+                return None
+            return monitor, float(metric_val)
+
+        core_keys = sorted(key for key in val_metrics if key.startswith("val-core/"))
+        if not core_keys:
+            print("Warning: No val-core metrics found, skip saving best checkpoint")
+            return None
+
+        reward_mean_keys = [key for key in core_keys if "/reward/mean@" in key]
+        acc_mean_keys = [key for key in core_keys if "/acc/mean@" in key]
+
+        selected_keys = reward_mean_keys or acc_mean_keys or core_keys
+        metric_name = selected_keys[0] if len(selected_keys) == 1 else f"avg[{', '.join(selected_keys)}]"
+        metric_val = float(np.mean([float(val_metrics[key]) for key in selected_keys]))
+        return metric_name, metric_val
+
+    def _is_best_checkpoint_candidate(self, score: float, step: int) -> bool:
+        topk = self.config.trainer.get("best_ckpt_topk", 0)
+        if not isinstance(topk, int) or topk <= 0:
+            return False
+
+        existing_records = [record for record in self.best_ckpt_records if record["step"] != step]
+        candidate_records = self._sort_best_checkpoint_records(
+            existing_records
+            + [{"step": step, "score": score, "metric_name": "__candidate__", "path": "__candidate__"}]
+        )
+        return any(record["path"] == "__candidate__" for record in candidate_records[:topk])
+
+    def _save_best_checkpoint_copy(self, metric_name: str, score: float) -> None:
+        topk = self.config.trainer.get("best_ckpt_topk", 0)
+        if not isinstance(topk, int) or topk <= 0:
+            return
+
+        source_path = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
+        if not os.path.exists(source_path):
+            raise FileNotFoundError(f"Checkpoint source path does not exist: {source_path}")
+
+        os.makedirs(self.best_ckpt_dir, exist_ok=True)
+        destination_path = os.path.join(self.best_ckpt_dir, f"global_step_{self.global_steps}")
+        if os.path.exists(destination_path):
+            shutil.rmtree(destination_path, ignore_errors=True)
+        shutil.copytree(source_path, destination_path)
+
+        self.best_ckpt_records = [record for record in self.best_ckpt_records if record["step"] != self.global_steps]
+        self.best_ckpt_records.append(
+            {
+                "step": self.global_steps,
+                "score": score,
+                "metric_name": metric_name,
+                "path": destination_path,
+            }
+        )
+        self.best_ckpt_records = self._sort_best_checkpoint_records(self.best_ckpt_records)
+
+        stale_records = self.best_ckpt_records[topk:]
+        self.best_ckpt_records = self.best_ckpt_records[:topk]
+        for record in stale_records:
+            if record["path"] != destination_path and os.path.exists(record["path"]):
+                shutil.rmtree(record["path"], ignore_errors=True)
+
+        self._write_best_checkpoint_metadata()
+        print(
+            f"Saved best checkpoint for step {self.global_steps}: metric={metric_name}, score={score}, "
+            f"topk={topk}, path={destination_path}"
+        )
+
+    def _maybe_save_best_checkpoint(self, val_metrics: dict, checkpoint_saved_this_step: bool) -> bool:
+        topk = self.config.trainer.get("best_ckpt_topk", 0)
+        if not isinstance(topk, int) or topk <= 0 or not val_metrics:
+            return checkpoint_saved_this_step
+
+        metric = self._resolve_best_checkpoint_metric(val_metrics)
+        if metric is None:
+            return checkpoint_saved_this_step
+
+        metric_name, score = metric
+        if not np.isfinite(score):
+            print(f"Warning: best checkpoint metric {metric_name} is not finite ({score}), skip saving best ckpt")
+            return checkpoint_saved_this_step
+
+        if not self._is_best_checkpoint_candidate(score, self.global_steps):
+            return checkpoint_saved_this_step
+
+        if not checkpoint_saved_this_step:
+            self._save_checkpoint()
+            checkpoint_saved_this_step = True
+
+        self._save_best_checkpoint_copy(metric_name=metric_name, score=score)
+        return checkpoint_saved_this_step
+
     def _load_checkpoint(self):
         if self.config.trainer.resume_mode == "disable":
             # NOTE: while there is no checkpoint to load, we still need to offload the model and optimizer to CPU
@@ -1009,6 +1158,7 @@ class RayPPOTrainer:
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
                 metrics = {}
+                val_metrics = {}
                 timing_raw = {}
 
                 with marked_timer("start_profile", timing_raw):
@@ -1252,6 +1402,11 @@ class RayPPOTrainer:
                         print("Force saving checkpoint: ESI instance expiration approaching.")
                     with marked_timer("save_checkpoint", timing_raw, color="green"):
                         self._save_checkpoint()
+                    checkpoint_saved_this_step = True
+                else:
+                    checkpoint_saved_this_step = False
+
+                checkpoint_saved_this_step = self._maybe_save_best_checkpoint(val_metrics, checkpoint_saved_this_step)
 
                 with marked_timer("stop_profile", timing_raw):
                     next_step_profile = (

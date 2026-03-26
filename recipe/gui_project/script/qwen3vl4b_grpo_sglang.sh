@@ -21,6 +21,8 @@ TRAIN_FILE=dataset/ui_agile_grounding/data_process_2/train.parquet
 VAL_FILE=dataset/screenspot_pro_grounding/data_process_2/val_500.parquet
 # VAL_FILE='[dataset/screenspot_pro_grounding/data_process_2/val_500.parquet,dataset/another_eval/data_process/val.parquet]'
 
+BEST_CKPT_METRIC="val-core/screenspot_pro_grounding/reward/mean@1"
+
 REWARD_FUNCTION_PATH=recipe/gui_project/reward/in_box_reward.py
 REWARD_FUNCTION_NAME=compute_score
 
@@ -80,5 +82,8 @@ PYTHONUNBUFFERED=1 python -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=10 \
     trainer.test_freq=10 \
+    trainer.best_ckpt_topk=5 \
+    trainer.best_ckpt_metric="${BEST_CKPT_METRIC}" \
+    trainer.best_ckpt_mode=max \
     trainer.total_epochs=6 \
     | tee "${SAVE_CHECKPOINT_PATH}/train.log"

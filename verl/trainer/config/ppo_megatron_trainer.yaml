@@ -93,6 +93,9 @@ trainer:
   del_local_ckpt_after_load: False
   val_before_train: True
   test_freq: -1
+  best_ckpt_topk: 0
+  best_ckpt_metric: auto
+  best_ckpt_mode: max
   critic_warmup: 0
   default_hdfs_dir: null
   default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}

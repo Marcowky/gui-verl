@@ -180,6 +180,15 @@ trainer:
   # Validation frequency (in training iterations)
   test_freq: -1
 
+  # Number of best-validation checkpoints to keep. Set to 0 to disable.
+  best_ckpt_topk: 0
+
+  # Validation metric used to rank best checkpoints. Use "auto" to infer from val-core metrics.
+  best_ckpt_metric: auto
+
+  # Whether a larger or smaller validation metric is better. Options: "max", "min".
+  best_ckpt_mode: max
+
   # Number of iterations to warm up the critic before updating policy
   critic_warmup: 0
 
