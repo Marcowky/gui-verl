@@ -119,3 +119,10 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# python -m recipe.gui_project.data_process.data_process_2_to_verl \
+#     --img-folder "dataset/gta1_grounding/data_process_1/images" \
+#     --json-path "dataset/gta1_grounding/data_process_1_dapo_filtered/train_filtered.json" \
+#     --output-path "dataset/gta1_grounding/data_process_2/train_filtered.parquet" \
+#     --dataset-name "gta1_grounding"

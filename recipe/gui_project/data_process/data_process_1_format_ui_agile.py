@@ -170,3 +170,7 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# python -m recipe.gui_project.data_process.data_process_1_format_ui_agile \
+#     --output-root "dataset/ui_agile_grounding/data_process_1" \
+#     --val-ratio 0.0
