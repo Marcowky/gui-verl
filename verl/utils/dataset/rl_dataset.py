@@ -287,11 +287,16 @@ class RLHFDataset(Dataset):
 
         return messages
 
+    def preprocess_row_dict(self, row_dict: dict) -> dict:
+        """Hook for lightweight per-sample customization before prompt / multimodal processing."""
+        return row_dict
+
     def __getitem__(self, item):
         """
         Note that we also return the raw_input_ids so that it can be combined with other chat template
         """
         row_dict: dict = self.dataframe[item]
+        row_dict = self.preprocess_row_dict(row_dict=row_dict)
         messages = self._build_messages(row_dict)
         model_inputs = {}
 

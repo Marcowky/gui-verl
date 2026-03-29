@@ -542,6 +542,16 @@ class RayPPOTrainer:
         sample_turns = []
         sample_uids = []
 
+        if hasattr(self.val_dataset, "set_runtime_progress"):
+            self.val_dataset.set_runtime_progress(
+                split="val",
+                epoch=1,
+                global_step=self.global_steps,
+                step_in_epoch=1,
+                total_epochs=self.config.trainer.total_epochs,
+                total_steps=self.total_training_steps,
+            )
+
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
 
@@ -1156,7 +1166,23 @@ class RayPPOTrainer:
         next_step_profile = False
 
         for epoch in range(self.config.trainer.total_epochs):
-            for batch_dict in self.train_dataloader:
+            data_iter = iter(self.train_dataloader)
+            step_in_epoch = 0
+            while True:
+                step_in_epoch += 1
+                if hasattr(self.train_dataset, "set_runtime_progress"):
+                    self.train_dataset.set_runtime_progress(
+                        split="train",
+                        epoch=epoch + 1,
+                        global_step=self.global_steps,
+                        step_in_epoch=step_in_epoch,
+                        total_epochs=self.config.trainer.total_epochs,
+                        total_steps=self.total_training_steps,
+                    )
+                try:
+                    batch_dict = next(data_iter)
+                except StopIteration:
+                    break
                 metrics = {}
                 val_metrics = {}
                 timing_raw = {}

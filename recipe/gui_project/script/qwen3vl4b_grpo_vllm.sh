@@ -8,11 +8,14 @@ export NCCL_IB_DISABLE=1
 export NCCL_PROTO=Simple
 export NCCL_MIN_NCHANNELS=2
 export NCCL_MAX_NCHANNELS=4
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=1,2,3,4
 
 DATE=$(date +%Y%m%d_%H%M%S)
 GPU_NUMS=4
 MODEL_PATH=/home/kaiyu/Model/Qwen/Qwen3-VL-4B-Instruct
+
+# GT_BBOX_DRAW_TAG="none"
+GT_BBOX_DRAW_TAG="first_two_epoch"
 
 PROJECT_NAME=gui_rlvr_baseline
 EXPERIMENT_NAME=${DATE}-qwen3_vl_4b_gta1_filtered_grpo
@@ -52,6 +55,9 @@ PYTHONUNBUFFERED=1 python -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.image_key=images \
     data.seed=42 \
+    data.custom_cls.path=pkg://recipe.gui_project.training_process.bbox_draw \
+    data.custom_cls.name=GuiGroundingBboxDrawDataset \
+    +data.gt_bbox_draw_tag="${GT_BBOX_DRAW_TAG}" \
     custom_reward_function.path="${REWARD_FUNCTION_PATH}" \
     custom_reward_function.name="${REWARD_FUNCTION_NAME}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
@@ -87,6 +93,7 @@ PYTHONUNBUFFERED=1 python -m verl.trainer.main_ppo \
     trainer.nnodes=1 \
     trainer.save_freq=10 \
     trainer.test_freq=10 \
+    trainer.val_before_train=True \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.best_ckpt_topk=3 \
     trainer.best_ckpt_metric="${BEST_CKPT_METRIC}" \
