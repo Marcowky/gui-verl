@@ -1310,6 +1310,15 @@ class RayPPOTrainer:
 
                         if reward_extra_infos_dict:
                             batch.non_tensor_batch.update({k: np.array(v) for k, v in reward_extra_infos_dict.items()})
+                            # Surface numeric reward extras as train-time scalar metrics for trackers like wandb.
+                            for key, vals in reward_extra_infos_dict.items():
+                                if key == "score" or len(vals) == 0:
+                                    continue
+                                try:
+                                    metric_vals = np.asarray(vals, dtype=np.float64)
+                                except (TypeError, ValueError):
+                                    continue
+                                metrics[f"train-reward-extra/{key}/mean"] = float(metric_vals.mean())
 
                         # compute rewards. apply_kl_penalty if available
                         if self.config.algorithm.use_kl_in_reward:
