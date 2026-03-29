@@ -19,8 +19,6 @@ def compute_score(
     wrong_reward=0.0,
     invalid_format_reward=0.0,
 ):
-    del data_source
-
     extra_info = extra_info or {}
     parsed = extract_point_from_response(solution_str)
     point = parsed["point"]
@@ -33,6 +31,7 @@ def compute_score(
             "pred_x": -1.0,
             "pred_y": -1.0,
             "parse_error": parsed["parse_error"] or "unknown",
+            "data_source": str(data_source),
             "img_filename": extra_info.get("img_filename", ""),
             "index": str(extra_info.get("index", -1)),
         }
@@ -47,6 +46,7 @@ def compute_score(
         "pred_x": float(point[0]),
         "pred_y": float(point[1]),
         "parse_error": "",
+        "data_source": str(data_source),
         "img_filename": extra_info.get("img_filename", ""),
         "index": str(extra_info.get("index", -1)),
     }

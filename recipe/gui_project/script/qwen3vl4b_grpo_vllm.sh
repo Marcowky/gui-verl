@@ -15,15 +15,17 @@ GPU_NUMS=4
 MODEL_PATH=/home/kaiyu/Model/Qwen/Qwen3-VL-4B-Instruct
 
 PROJECT_NAME=gui_rlvr_baseline
-EXPERIMENT_NAME=${DATE}-qwen3_vl_4b_ui_agile
+EXPERIMENT_NAME=${DATE}-qwen3_vl_4b_gta1_filtered_grpo
 
-TRAIN_FILE=dataset/ui_agile_grounding/data_process_2/train.parquet
-VAL_FILE=dataset/screenspot_pro_grounding/data_process_2/val_500.parquet
-# VAL_FILE='[dataset/screenspot_pro_grounding/data_process_2/val_500.parquet,dataset/another_eval/data_process/val.parquet]'
+# TRAIN_FILE=dataset/ui_agile_grounding/data_process_2/train.parquet
+TRAIN_FILE=dataset/gta1_grounding/data_process_2/train_filtered.parquet
+# VAL_FILE=dataset/screenspot_pro_grounding/data_process_2/val_500.parquet
+VAL_FILE='[dataset/screenspot_pro_grounding/data_process_2/val.parquet,dataset/gta1_grounding/data_process_2/val_filtered.parquet]'
 
-BEST_CKPT_METRIC="val-core/screenspot_pro_grounding/reward/mean@1"
+BEST_CKPT_METRIC="val-aux/gta1_grounding/in_box/mean@1"
 
-REWARD_FUNCTION_PATH=recipe/gui_project/reward/in_box_reward.py
+# REWARD_FUNCTION_PATH=recipe/gui_project/reward/in_box_reward.py
+REWARD_FUNCTION_PATH=recipe/gui_project/reward/se_gui_reward.py
 REWARD_FUNCTION_NAME=compute_score
 
 SAVE_CHECKPOINT_PATH=checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME} # normal
@@ -40,6 +42,7 @@ PYTHONUNBUFFERED=1 python -m verl.trainer.main_ppo \
     data.train_files="${TRAIN_FILE}" \
     data.val_files="${VAL_FILE}" \
     data.train_batch_size=128 \
+    data.train_max_samples=9000 \
     data.val_batch_size=128 \
     data.dataloader_num_workers=0 \
     data.max_prompt_length=7168 \
@@ -48,6 +51,7 @@ PYTHONUNBUFFERED=1 python -m verl.trainer.main_ppo \
     data.filter_overlong_prompts_workers=32 \
     data.truncation='error' \
     data.image_key=images \
+    data.seed=42 \
     custom_reward_function.path="${REWARD_FUNCTION_PATH}" \
     custom_reward_function.name="${REWARD_FUNCTION_NAME}" \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
