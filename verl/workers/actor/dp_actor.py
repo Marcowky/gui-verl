@@ -223,24 +223,17 @@ class DataParallelPPOActor(BasePPOActor):
                     continue
 
                 sample_image_token_positions = sample_image_token_positions[:image_token_len]
-                sample_image_attention_sum = None
-                num_layers = 0
+                sample_image_attention_by_layer = []
                 for layer_attention in response_output.attentions:
                     sample_layer_attention = layer_attention[sample_idx].to(torch.float32)
                     sample_layer_attention = sample_layer_attention[:, sample_response_mask, :]
                     sample_layer_attention = sample_layer_attention[:, :, sample_image_token_positions]
                     sample_layer_image_attention = sample_layer_attention.mean(dim=(0, 1))
-                    if sample_image_attention_sum is None:
-                        sample_image_attention_sum = sample_layer_image_attention
-                    else:
-                        sample_image_attention_sum = sample_image_attention_sum + sample_layer_image_attention
-                    num_layers += 1
-
-                sample_image_attention = sample_image_attention_sum / num_layers
-                sample_image_attention = sample_image_attention.reshape(grid_t, grid_h, grid_w).mean(dim=0)
+                    sample_layer_image_attention = sample_layer_image_attention.reshape(grid_t, grid_h, grid_w).mean(dim=0)
+                    sample_image_attention_by_layer.append(sample_layer_image_attention.detach().cpu().numpy())
 
                 attention_infos[sample_idx] = {
-                    "image_attention": sample_image_attention.detach().cpu().numpy(),
+                    "image_attention_by_layer": sample_image_attention_by_layer,
                     "image_attention_grid_shape": (grid_h, grid_w),
                 }
 

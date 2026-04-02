@@ -2,6 +2,55 @@ import math
 
 from recipe.gui_project.model.qwen3vl_utils import extract_point_from_response
 
+ATTENTION_METRIC_KEYS = (
+    "image_attention_sum",
+    "image_attention_per_token",
+    "bbox_attention_sum",
+    "bbox_attention_sum_over_image_attention_sum",
+    "bbox_attention_per_token",
+    "bbox_attention_per_token_over_image_attention_per_token",
+    "image_attention_height",
+    "image_attention_width",
+    "bbox_attention_height",
+    "bbox_attention_width",
+)
+
+LAYERED_ATTENTION_METRIC_KEY_PREFIXES = (
+    "image_attention_sum/layer_",
+    "image_attention_per_token/layer_",
+    "bbox_attention_sum/layer_",
+    "bbox_attention_sum_over_image_attention_sum/layer_",
+    "bbox_attention_per_token/layer_",
+    "bbox_attention_per_token_over_image_attention_per_token/layer_",
+)
+
+
+def compute_bbox_patch_bounds(
+    bbox_xyxy_normalized: dict[str, float] | None, grid_h: int, grid_w: int
+) -> tuple[int, int, int, int, int, int]:
+    if bbox_xyxy_normalized is None or grid_h <= 0 or grid_w <= 0:
+        return -1, -1, -1, -1, -1, -1
+
+    x1 = min(max(float(bbox_xyxy_normalized["x1"]), 0.0), 1.0)
+    y1 = min(max(float(bbox_xyxy_normalized["y1"]), 0.0), 1.0)
+    x2 = min(max(float(bbox_xyxy_normalized["x2"]), 0.0), 1.0)
+    y2 = min(max(float(bbox_xyxy_normalized["y2"]), 0.0), 1.0)
+
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+
+    x_start = min(int(math.floor(x1 * grid_w)), grid_w - 1)
+    x_end = max(x_start + 1, int(math.ceil(x2 * grid_w)))
+    x_end = min(x_end, grid_w)
+
+    y_start = min(int(math.floor(y1 * grid_h)), grid_h - 1)
+    y_end = max(y_start + 1, int(math.ceil(y2 * grid_h)))
+    y_end = min(y_end, grid_h)
+
+    return x_start, x_end, y_start, y_end, y_end - y_start, x_end - x_start
+
 
 def is_point_in_bbox(point: list[float] | None, bbox_xyxy_normalized: dict[str, float]) -> bool:
     if point is None:
@@ -40,16 +89,16 @@ def compute_point_reward(point: list[float], bbox_xyxy_normalized: dict[str, flo
 def compute_attention_metrics(
     image_attention,
     bbox_xyxy_normalized: dict[str, float],
-) -> tuple[float, float]:
+) -> dict[str, float]:
     if image_attention is None:
-        return -1.0, -1.0
+        return {key: -1.0 for key in ATTENTION_METRIC_KEYS}
 
     grid_h = len(image_attention)
     if grid_h == 0:
-        return -1.0, -1.0
+        return {key: -1.0 for key in ATTENTION_METRIC_KEYS}
     grid_w = len(image_attention[0])
     if grid_w == 0:
-        return -1.0, -1.0
+        return {key: -1.0 for key in ATTENTION_METRIC_KEYS}
 
     attention_sum = 0.0
     for row in image_attention:
@@ -57,26 +106,10 @@ def compute_attention_metrics(
             attention_sum += float(value)
 
     image_token_avg_attention = attention_sum / float(grid_h * grid_w)
-    if image_token_avg_attention <= 0:
-        return float(attention_sum), -1.0
 
-    x1 = min(max(float(bbox_xyxy_normalized["x1"]), 0.0), 1.0)
-    y1 = min(max(float(bbox_xyxy_normalized["y1"]), 0.0), 1.0)
-    x2 = min(max(float(bbox_xyxy_normalized["x2"]), 0.0), 1.0)
-    y2 = min(max(float(bbox_xyxy_normalized["y2"]), 0.0), 1.0)
-
-    if x2 < x1:
-        x1, x2 = x2, x1
-    if y2 < y1:
-        y1, y2 = y2, y1
-
-    x_start = min(int(math.floor(x1 * grid_w)), grid_w - 1)
-    x_end = max(x_start + 1, int(math.ceil(x2 * grid_w)))
-    x_end = min(x_end, grid_w)
-
-    y_start = min(int(math.floor(y1 * grid_h)), grid_h - 1)
-    y_end = max(y_start + 1, int(math.ceil(y2 * grid_h)))
-    y_end = min(y_end, grid_h)
+    x_start, x_end, y_start, y_end, bbox_height, bbox_width = compute_bbox_patch_bounds(
+        bbox_xyxy_normalized, grid_h, grid_w
+    )
 
     bbox_attention_sum = 0.0
     bbox_token_count = 0
@@ -85,12 +118,79 @@ def compute_attention_metrics(
             bbox_attention_sum += float(image_attention[y_idx][x_idx])
             bbox_token_count += 1
 
-    if bbox_token_count == 0:
-        return float(attention_sum), -1.0
+    bbox_attention_sum_over_image_attention_sum = -1.0
+    if attention_sum > 0:
+        bbox_attention_sum_over_image_attention_sum = bbox_attention_sum / float(attention_sum)
 
-    bbox_token_avg_attention = bbox_attention_sum / float(bbox_token_count)
-    bbox_attention_ratio = bbox_token_avg_attention / image_token_avg_attention
-    return float(attention_sum), float(bbox_attention_ratio)
+    bbox_token_avg_attention = -1.0
+    bbox_attention_per_token_over_image_attention_per_token = -1.0
+    if bbox_token_count > 0:
+        bbox_token_avg_attention = bbox_attention_sum / float(bbox_token_count)
+        if image_token_avg_attention > 0:
+            bbox_attention_per_token_over_image_attention_per_token = (
+                bbox_token_avg_attention / image_token_avg_attention
+            )
+
+    return {
+        "image_attention_sum": float(attention_sum),
+        "image_attention_per_token": float(image_token_avg_attention),
+        "bbox_attention_sum": float(bbox_attention_sum),
+        "bbox_attention_sum_over_image_attention_sum": float(bbox_attention_sum_over_image_attention_sum),
+        "bbox_attention_per_token": float(bbox_token_avg_attention),
+        "bbox_attention_per_token_over_image_attention_per_token": float(
+            bbox_attention_per_token_over_image_attention_per_token
+        ),
+        "image_attention_height": float(grid_h),
+        "image_attention_width": float(grid_w),
+        "bbox_attention_height": float(bbox_height),
+        "bbox_attention_width": float(bbox_width),
+    }
+
+
+def get_attention_metrics(
+    extra_info: dict,
+    ground_truth: dict[str, float],
+) -> dict[str, float]:
+    image_attention_by_layer = extra_info.get("image_attention_by_layer")
+    if image_attention_by_layer is not None and len(image_attention_by_layer) > 0:
+        layer_metrics = [compute_attention_metrics(layer_attention, ground_truth) for layer_attention in image_attention_by_layer]
+        attention_metrics = {}
+        for key in ATTENTION_METRIC_KEYS:
+            attention_metrics[key] = float(sum(metrics[key] for metrics in layer_metrics) / len(layer_metrics))
+        return attention_metrics
+
+    image_attention = extra_info.get("image_attention")
+    fallback_metrics = compute_attention_metrics(image_attention, ground_truth)
+
+    attention_metrics = {}
+    for key in ATTENTION_METRIC_KEYS:
+        attention_metrics[key] = float(extra_info.get(key, fallback_metrics[key]))
+
+    return attention_metrics
+
+
+def get_layered_attention_metrics(extra_info: dict, ground_truth: dict[str, float]) -> dict[str, float]:
+    image_attention_by_layer = extra_info.get("image_attention_by_layer")
+    if image_attention_by_layer is not None and len(image_attention_by_layer) > 0:
+        layered_attention_metrics = {}
+        for layer_idx, layer_attention in enumerate(image_attention_by_layer):
+            layer_metrics = compute_attention_metrics(layer_attention, ground_truth)
+            for key in (
+                "image_attention_sum",
+                "image_attention_per_token",
+                "bbox_attention_sum",
+                "bbox_attention_sum_over_image_attention_sum",
+                "bbox_attention_per_token",
+                "bbox_attention_per_token_over_image_attention_per_token",
+            ):
+                layered_attention_metrics[f"{key}/layer_{layer_idx:02d}"] = float(layer_metrics[key])
+        return layered_attention_metrics
+
+    layered_attention_metrics = {}
+    for key, value in extra_info.items():
+        if any(key.startswith(prefix) for prefix in LAYERED_ATTENTION_METRIC_KEY_PREFIXES):
+            layered_attention_metrics[key] = float(value)
+    return layered_attention_metrics
 
 
 def compute_score(
@@ -103,13 +203,20 @@ def compute_score(
     invalid_format_reward=0.0,
 ):
     extra_info = extra_info or {}
-    image_attention = extra_info.get("image_attention")
-    image_attention_sum, bbox_image_attention_ratio = compute_attention_metrics(image_attention, ground_truth)
+    attention_metrics = get_attention_metrics(extra_info, ground_truth)
+    layered_attention_metrics = get_layered_attention_metrics(extra_info, ground_truth)
     parsed = extract_point_from_response(solution_str)
     point = parsed["point"]
+    has_image_attention = float(
+        (
+            extra_info.get("image_attention_by_layer") is not None
+            or extra_info.get("image_attention") is not None
+            or attention_metrics["image_attention_sum"] >= 0.0
+        )
+    )
 
     if point is None:
-        return {
+        result = {
             "score": float(invalid_format_reward),
             "format_ok": 0.0,
             "in_box": 0.0,
@@ -121,10 +228,12 @@ def compute_score(
             "data_source": str(data_source),
             "img_filename": extra_info.get("img_filename", ""),
             "index": str(extra_info.get("index", -1)),
-            "has_image_attention": float(image_attention is not None),
-            "image_attention_sum": float(image_attention_sum),
-            "bbox_image_attention_ratio": float(bbox_image_attention_ratio),
         }
+        result["has_image_attention"] = has_image_attention
+        result.update(attention_metrics)
+        result["bbox_image_attention_ratio"] = attention_metrics["bbox_attention_per_token_over_image_attention_per_token"]
+        result.update(layered_attention_metrics)
+        return result
 
     in_box = is_point_in_bbox(point, ground_truth)
     distance_term, distance_to_center, distance_max = compute_point_reward(point, ground_truth)
@@ -134,7 +243,7 @@ def compute_score(
     else:
         score = wrong_reward + distance_term
 
-    return {
+    result = {
         "score": float(score),
         "format_ok": 1.0,
         "in_box": float(in_box),
@@ -146,7 +255,9 @@ def compute_score(
         "data_source": str(data_source),
         "img_filename": extra_info.get("img_filename", ""),
         "index": str(extra_info.get("index", -1)),
-        "has_image_attention": float(image_attention is not None),
-        "image_attention_sum": float(image_attention_sum),
-        "bbox_image_attention_ratio": float(bbox_image_attention_ratio),
     }
+    result["has_image_attention"] = has_image_attention
+    result.update(attention_metrics)
+    result["bbox_image_attention_ratio"] = attention_metrics["bbox_attention_per_token_over_image_attention_per_token"]
+    result.update(layered_attention_metrics)
+    return result
