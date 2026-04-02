@@ -167,11 +167,12 @@ class DataParallelPPOActor(BasePPOActor):
                 return attention_infos
 
             prompt_length = input_ids.size(-1) - response_length
-            prompt_input_ids = input_ids[:, :prompt_length]
-            prompt_attention_mask = attention_mask[:, :prompt_length]
-            prompt_position_ids = position_ids[..., :prompt_length]
-            response_input_ids = input_ids[:, -response_length:]
-            response_position_ids = position_ids[..., -response_length:]
+            prompt_prefix_input_ids = input_ids[:, : prompt_length - 1]
+            prompt_prefix_attention_mask = attention_mask[:, : prompt_length - 1]
+            prompt_prefix_position_ids = position_ids[..., : prompt_length - 1]
+            shifted_response_input_ids = input_ids[:, prompt_length - 1 : -1]
+            shifted_attention_mask = attention_mask[:, :-1]
+            shifted_position_ids = position_ids[..., prompt_length - 1 : -1]
 
             extra_args = {}
             if self.use_fused_kernels:
@@ -179,9 +180,9 @@ class DataParallelPPOActor(BasePPOActor):
                 extra_args["return_dict"] = True
 
             prompt_output = self.actor_module(
-                input_ids=prompt_input_ids,
-                attention_mask=prompt_attention_mask,
-                position_ids=prompt_position_ids,
+                input_ids=prompt_prefix_input_ids,
+                attention_mask=prompt_prefix_attention_mask,
+                position_ids=prompt_prefix_position_ids,
                 **multi_modal_inputs,
                 use_cache=True,
                 **extra_args,
@@ -189,9 +190,9 @@ class DataParallelPPOActor(BasePPOActor):
 
             with _temporary_attn_implementation(actor_model, "eager"):
                 response_output = self.actor_module(
-                    input_ids=response_input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=response_position_ids,
+                    input_ids=shifted_response_input_ids,
+                    attention_mask=shifted_attention_mask,
+                    position_ids=shifted_position_ids,
                     past_key_values=prompt_output.past_key_values,
                     output_attentions=True,
                     return_dict=True,
