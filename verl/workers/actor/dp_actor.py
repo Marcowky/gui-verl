@@ -17,8 +17,10 @@
 Single Process Actor
 """
 
+from contextlib import contextmanager
 import logging
 import os
+from itertools import chain
 
 import torch
 from torch import nn
@@ -44,6 +46,47 @@ __all__ = ["DataParallelPPOActor"]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _unwrap_module(module: nn.Module) -> nn.Module:
+    if hasattr(module, "module"):
+        return module.module
+    if hasattr(module, "_fsdp_wrapped_module"):
+        return module._fsdp_wrapped_module
+    return module
+
+
+@contextmanager
+def _temporary_attn_implementation(module: nn.Module, attn_implementation: str):
+    model = _unwrap_module(module)
+    set_attn_implementation = getattr(model, "set_attn_implementation", None)
+
+    if callable(set_attn_implementation):
+        old_attn_implementation = getattr(model.config, "_attn_implementation", None)
+        set_attn_implementation(attn_implementation)
+        try:
+            yield
+        finally:
+            if old_attn_implementation is not None:
+                set_attn_implementation(old_attn_implementation)
+        return
+
+    config_candidates = [
+        getattr(model, "config", None),
+        getattr(getattr(model, "config", None), "text_config", None),
+        getattr(getattr(model, "config", None), "vision_config", None),
+    ]
+    old_attn_implementations = []
+    for config in config_candidates:
+        if config is not None and hasattr(config, "_attn_implementation"):
+            old_attn_implementations.append((config, config._attn_implementation))
+            config._attn_implementation = attn_implementation
+
+    try:
+        yield
+    finally:
+        for config, old_attn_implementation in old_attn_implementations:
+            config._attn_implementation = old_attn_implementation
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -90,6 +133,105 @@ class DataParallelPPOActor(BasePPOActor):
             self.scaler = ShardedGradScaler(growth_interval=400)
         else:
             self.scaler = None
+
+    def _forward_micro_batch_attention(self, micro_batch) -> list[dict]:
+        response_length = micro_batch["responses"].size(-1)
+        batch_size = micro_batch["input_ids"].size(0)
+        attention_infos = [{} for _ in range(batch_size)]
+
+        if "multi_modal_inputs" not in micro_batch.keys():
+            return attention_infos
+
+        from verl.utils.model import extract_multi_modal_inputs
+
+        multi_modal_inputs = extract_multi_modal_inputs(micro_batch["multi_modal_inputs"])
+        image_grid_thw = multi_modal_inputs.get("image_grid_thw")
+        if image_grid_thw is None:
+            return attention_infos
+
+        with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):
+            input_ids = micro_batch["input_ids"]
+            attention_mask = micro_batch["attention_mask"]
+            position_ids = micro_batch["position_ids"]
+            response_mask = micro_batch.get("response_mask", attention_mask[:, -response_length:]).bool()
+
+            if position_ids.dim() == 3:  # qwen2vl mrope
+                position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
+
+            prompt_length = input_ids.size(-1) - response_length
+            prompt_input_ids = input_ids[:, :prompt_length]
+            prompt_attention_mask = attention_mask[:, :prompt_length]
+            prompt_position_ids = position_ids[..., :prompt_length]
+            response_input_ids = input_ids[:, -response_length:]
+            response_position_ids = position_ids[..., -response_length:]
+
+            actor_model = _unwrap_module(self.actor_module)
+            model_config = getattr(actor_model, "config", None)
+            image_token_id = getattr(model_config, "image_token_id", None)
+            spatial_merge_size = getattr(getattr(model_config, "vision_config", None), "spatial_merge_size", 1)
+
+            if image_token_id is None:
+                return attention_infos
+
+            prompt_output = self.actor_module(
+                input_ids=prompt_input_ids,
+                attention_mask=prompt_attention_mask,
+                position_ids=prompt_position_ids,
+                **multi_modal_inputs,
+                output_attentions=False,
+                return_dict=True,
+                use_cache=True,
+            )
+            with _temporary_attn_implementation(actor_model, "eager"):
+                response_output = self.actor_module(
+                    input_ids=response_input_ids,
+                    attention_mask=attention_mask,
+                    position_ids=response_position_ids,
+                    past_key_values=prompt_output.past_key_values,
+                    output_attentions=True,
+                    return_dict=True,
+                    use_cache=False,
+                )
+
+            if response_output.attentions is None:
+                return attention_infos
+
+            for sample_idx in range(batch_size):
+                sample_response_mask = response_mask[sample_idx]
+                if not torch.any(sample_response_mask):
+                    continue
+
+                sample_image_grid_thw = micro_batch["multi_modal_inputs"][sample_idx].get("image_grid_thw")
+                if sample_image_grid_thw is None or sample_image_grid_thw.shape[0] == 0:
+                    continue
+
+                grid_t = int(sample_image_grid_thw[0][0].item())
+                grid_h = int(sample_image_grid_thw[0][1].item()) // spatial_merge_size
+                grid_w = int(sample_image_grid_thw[0][2].item()) // spatial_merge_size
+                image_token_len = grid_t * grid_h * grid_w
+
+                sample_image_token_positions = torch.nonzero(input_ids[sample_idx] == image_token_id, as_tuple=False).squeeze(-1)
+                if sample_image_token_positions.numel() < image_token_len or image_token_len == 0:
+                    continue
+
+                sample_image_token_positions = sample_image_token_positions[:image_token_len]
+                sample_attentions = []
+                for layer_attention in response_output.attentions:
+                    sample_layer_attention = layer_attention[sample_idx].to(torch.float32)
+                    sample_layer_attention = sample_layer_attention[:, sample_response_mask, :]
+                    sample_layer_attention = sample_layer_attention[:, :, sample_image_token_positions]
+                    sample_attentions.append(sample_layer_attention)
+
+                sample_attentions = torch.stack(sample_attentions, dim=0)
+                sample_image_attention = sample_attentions.mean(dim=(0, 1, 2))
+                sample_image_attention = sample_image_attention.reshape(grid_t, grid_h, grid_w).mean(dim=0)
+
+                attention_infos[sample_idx] = {
+                    "image_attention": sample_image_attention.detach().cpu().numpy(),
+                    "image_attention_grid_shape": (grid_h, grid_w),
+                }
+
+        return attention_infos
 
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
@@ -367,6 +509,44 @@ class DataParallelPPOActor(BasePPOActor):
                 entropys = restore_dynamic_batch(entropys, batch_idx_list)
 
         return log_probs, entropys
+
+    @GPUMemoryLogger(role="dp actor", logger=logger)
+    def compute_attention(self, data: DataProto) -> list[dict]:
+        self.actor_module.eval()
+
+        micro_batch_size = data.meta_info["micro_batch_size"]
+        use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
+        has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
+        has_response_mask = "response_mask" in data.batch.keys()
+        select_keys = ["responses", "input_ids", "attention_mask", "position_ids"]
+        if has_response_mask:
+            select_keys.append("response_mask")
+        non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
+
+        data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
+
+        if use_dynamic_bsz:
+            max_token_len = data.meta_info["max_token_len"] * self.ulysses_sequence_parallel_size
+            micro_batches, batch_idx_list = prepare_dynamic_batch(data, max_token_len=max_token_len)
+        else:
+            micro_batches = data.split(micro_batch_size)
+
+        attention_infos = []
+        for micro_batch in micro_batches:
+            micro_batch = micro_batch.to(get_device_id())
+            model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+            with torch.no_grad():
+                micro_batch_attention_infos = self._forward_micro_batch_attention(model_inputs)
+            attention_infos.extend(micro_batch_attention_infos)
+
+        if use_dynamic_bsz:
+            indices = list(chain.from_iterable(batch_idx_list))
+            restored_attention_infos = [None] * len(indices)
+            for old_idx, new_idx in enumerate(indices):
+                restored_attention_infos[new_idx] = attention_infos[old_idx]
+            attention_infos = restored_attention_infos
+
+        return attention_infos
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def update_policy(self, data: DataProto):

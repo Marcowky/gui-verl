@@ -62,6 +62,9 @@ custom_reward_function:
   # The name of the reward function within the specified file. Default is 'compute_score'.
   name: compute_score
 
+  # Whether to compute actor attention maps and pass them into extra_info for reward_fn.
+  compute_attention: False
+
 # config for the algorithm
 algorithm:
 

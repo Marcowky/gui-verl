@@ -264,7 +264,9 @@ def forward_with_normal_backend(
 
     return Qwen3VLCausalLMOutputForPPO(
         logits=logits,
+        past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
     )
 
 
@@ -298,7 +300,9 @@ def forward_with_torch_backend(
     return Qwen3VLCausalLMOutputForPPO(
         log_probs=log_probs,
         entropy=entropy,
+        past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
     )
 
 
@@ -332,5 +336,7 @@ def forward_with_triton_backend(
     return Qwen3VLCausalLMOutputForPPO(
         log_probs=log_probs,
         entropy=entropy,
+        past_key_values=outputs.past_key_values,
         hidden_states=outputs.hidden_states,
+        attentions=outputs.attentions,
     )

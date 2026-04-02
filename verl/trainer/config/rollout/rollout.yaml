@@ -83,6 +83,10 @@ log_prob_micro_batch_size: null
 # The batch size for one forward pass in the computation of log_prob. Local batch size per GPU.
 log_prob_micro_batch_size_per_gpu: null
 
+# The batch size for one forward pass in the computation of reward attention. Local batch size per GPU.
+# same as log_prob_micro_batch_size_per_gpu if not set explicitly
+attention_micro_batch_size_per_gpu: ${oc.select:actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu,null}
+
 # enable dynamic batch size (sequence packing) for log_prob computation
 # same as actor_rollout_ref.actor.use_dynamic_bsz if it exists, otherwise false
 log_prob_use_dynamic_bsz: ${oc.select:actor_rollout_ref.actor.use_dynamic_bsz,false}
@@ -313,4 +317,3 @@ prometheus:
 
   # Specify served_model_name to avoid displaying overly long model paths in Grafana
   served_model_name: ${oc.select:actor_rollout_ref.model.path,null}
-

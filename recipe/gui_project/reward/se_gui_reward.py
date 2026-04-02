@@ -37,6 +37,62 @@ def compute_point_reward(point: list[float], bbox_xyxy_normalized: dict[str, flo
     return distance_term, d, d_max
 
 
+def compute_attention_metrics(
+    image_attention,
+    bbox_xyxy_normalized: dict[str, float],
+) -> tuple[float, float]:
+    if image_attention is None:
+        return -1.0, -1.0
+
+    grid_h = len(image_attention)
+    if grid_h == 0:
+        return -1.0, -1.0
+    grid_w = len(image_attention[0])
+    if grid_w == 0:
+        return -1.0, -1.0
+
+    attention_sum = 0.0
+    for row in image_attention:
+        for value in row:
+            attention_sum += float(value)
+
+    image_token_avg_attention = attention_sum / float(grid_h * grid_w)
+    if image_token_avg_attention <= 0:
+        return float(attention_sum), -1.0
+
+    x1 = min(max(float(bbox_xyxy_normalized["x1"]), 0.0), 1.0)
+    y1 = min(max(float(bbox_xyxy_normalized["y1"]), 0.0), 1.0)
+    x2 = min(max(float(bbox_xyxy_normalized["x2"]), 0.0), 1.0)
+    y2 = min(max(float(bbox_xyxy_normalized["y2"]), 0.0), 1.0)
+
+    if x2 < x1:
+        x1, x2 = x2, x1
+    if y2 < y1:
+        y1, y2 = y2, y1
+
+    x_start = min(int(math.floor(x1 * grid_w)), grid_w - 1)
+    x_end = max(x_start + 1, int(math.ceil(x2 * grid_w)))
+    x_end = min(x_end, grid_w)
+
+    y_start = min(int(math.floor(y1 * grid_h)), grid_h - 1)
+    y_end = max(y_start + 1, int(math.ceil(y2 * grid_h)))
+    y_end = min(y_end, grid_h)
+
+    bbox_attention_sum = 0.0
+    bbox_token_count = 0
+    for y_idx in range(y_start, y_end):
+        for x_idx in range(x_start, x_end):
+            bbox_attention_sum += float(image_attention[y_idx][x_idx])
+            bbox_token_count += 1
+
+    if bbox_token_count == 0:
+        return float(attention_sum), -1.0
+
+    bbox_token_avg_attention = bbox_attention_sum / float(bbox_token_count)
+    bbox_attention_ratio = bbox_token_avg_attention / image_token_avg_attention
+    return float(attention_sum), float(bbox_attention_ratio)
+
+
 def compute_score(
     data_source,
     solution_str,
@@ -47,6 +103,8 @@ def compute_score(
     invalid_format_reward=0.0,
 ):
     extra_info = extra_info or {}
+    image_attention = extra_info.get("image_attention")
+    image_attention_sum, bbox_image_attention_ratio = compute_attention_metrics(image_attention, ground_truth)
     parsed = extract_point_from_response(solution_str)
     point = parsed["point"]
 
@@ -63,6 +121,9 @@ def compute_score(
             "data_source": str(data_source),
             "img_filename": extra_info.get("img_filename", ""),
             "index": str(extra_info.get("index", -1)),
+            "has_image_attention": float(image_attention is not None),
+            "image_attention_sum": float(image_attention_sum),
+            "bbox_image_attention_ratio": float(bbox_image_attention_ratio),
         }
 
     in_box = is_point_in_bbox(point, ground_truth)
@@ -85,4 +146,7 @@ def compute_score(
         "data_source": str(data_source),
         "img_filename": extra_info.get("img_filename", ""),
         "index": str(extra_info.get("index", -1)),
+        "has_image_attention": float(image_attention is not None),
+        "image_attention_sum": float(image_attention_sum),
+        "bbox_image_attention_ratio": float(bbox_image_attention_ratio),
     }

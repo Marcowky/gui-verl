@@ -152,6 +152,7 @@ class RolloutConfig(BaseConfig):
     # note that the logprob computation should belong to the actor
     log_prob_micro_batch_size: Optional[int] = None
     log_prob_micro_batch_size_per_gpu: Optional[int] = None
+    attention_micro_batch_size_per_gpu: Optional[int] = None
     log_prob_use_dynamic_bsz: bool = False
     log_prob_max_token_len_per_gpu: int = 16384
 
@@ -200,6 +201,9 @@ class RolloutConfig(BaseConfig):
 
     def __post_init__(self):
         """Validate the rollout config"""
+        if self.attention_micro_batch_size_per_gpu is None:
+            self.attention_micro_batch_size_per_gpu = self.log_prob_micro_batch_size_per_gpu
+
         if self.expert_parallel_size > 1:
             assert self.expert_parallel_size == (self.tensor_model_parallel_size * self.data_parallel_size), (
                 "expert_parallel_size must be equal to tensor_model_parallel_size * data_parallel_size"

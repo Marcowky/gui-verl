@@ -530,6 +530,25 @@ class RayPPOTrainer:
 
         return gen_batch
 
+    def _should_compute_reward_attention(self, batch: DataProto) -> bool:
+        return self.config.custom_reward_function.get("compute_attention", False) and "multi_modal_inputs" in batch.non_tensor_batch
+
+    def _merge_attention_into_extra_info(self, batch: DataProto, attention: DataProto) -> None:
+        attention_infos = attention.non_tensor_batch["attention_infos"]
+        if "extra_info" in batch.non_tensor_batch:
+            extra_info = batch.non_tensor_batch["extra_info"]
+        else:
+            extra_info = np.array([{} for _ in range(len(batch))], dtype=object)
+
+        merged_extra_info = []
+        for idx in range(len(batch)):
+            current_extra_info = extra_info[idx]
+            current_extra_info = {} if current_extra_info is None else dict(current_extra_info)
+            current_extra_info.update(attention_infos[idx])
+            merged_extra_info.append(current_extra_info)
+
+        batch.non_tensor_batch["extra_info"] = np.array(merged_extra_info, dtype=object)
+
     def _validate(self):
         data_source_lst = []
         reward_extra_infos_dict: dict[str, list] = defaultdict(list)
@@ -620,6 +639,9 @@ class RayPPOTrainer:
             # evaluate using reward_function
             if self.val_reward_fn is None:
                 raise ValueError("val_reward_fn must be provided for validation.")
+            if self._should_compute_reward_attention(test_batch):
+                attention = self.actor_rollout_wg.compute_attention(test_batch)
+                self._merge_attention_into_extra_info(test_batch, attention)
             result = self.val_reward_fn(test_batch, return_dict=True)
             reward_tensor = result["reward_tensor"]
             scores = reward_tensor.sum(-1).cpu().tolist()
@@ -1263,6 +1285,11 @@ class RayPPOTrainer:
 
                     # compute global_valid tokens
                     batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
+
+                    if self._should_compute_reward_attention(batch):
+                        with marked_timer("attention", timing_raw, color="purple"):
+                            attention = self.actor_rollout_wg.compute_attention(batch)
+                            self._merge_attention_into_extra_info(batch, attention)
 
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
