@@ -997,20 +997,34 @@ class ActorRolloutRefWorker(Worker, DistProfilerExtension):
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="actor"))
     @DistProfiler.annotate(color="purple", role="actor_compute_attention")
     def compute_attention(self, data: DataProto):
+        # when is_lora is True, we use the actor without lora applied to calculate the attention
+        # which is mostly used for ref attention calculation
         assert self._is_actor
         if self._is_offload_param:
             load_fsdp_model_to_gpu(self.actor_module_fsdp)
 
+        # Support all hardwares
+        from contextlib import nullcontext
+
+        is_lora = data.meta_info.pop("is_lora", False)
+        adapter_ctx = self.actor.actor_module.disable_adapter() if is_lora else nullcontext()
         data.meta_info["micro_batch_size"] = self.config.rollout.attention_micro_batch_size_per_gpu
         data.meta_info["max_token_len"] = self.config.rollout.log_prob_max_token_len_per_gpu
         data.meta_info["use_dynamic_bsz"] = self.config.rollout.log_prob_use_dynamic_bsz
-
+        data.meta_info["temperature"] = self.config.rollout.temperature
+        # perform recompute attention
         with self.ulysses_sharding_manager:
-            output = self.actor.compute_attention(data=data)
-            output = DataProto.from_dict(non_tensors={"attention_infos": output})
+            with adapter_ctx:
+                output = self.actor.compute_attention(data=data)
+            output = DataProto.from_dict(
+                non_tensors={"attention_infos": output},
+                meta_info={"temperature": self.config.rollout.temperature},
+            )
 
         output = output.to("cpu")
 
+        # https://pytorch.org/docs/stable/notes/fsdp.html#fsdp-notes
+        # unshard the root FSDP module
         if self.world_size > 1 and fsdp_version(self.actor.actor_module) == 1:
             self.actor.actor_module._handle.reshard(True)
 

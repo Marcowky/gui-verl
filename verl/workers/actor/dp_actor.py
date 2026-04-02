@@ -134,102 +134,249 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             self.scaler = None
 
-    def _forward_micro_batch_attention(self, micro_batch) -> list[dict]:
+    def _forward_micro_batch_attention(self, micro_batch, temperature) -> list[dict]:
+        """
+        Returns:
+            attention_infos: # list[dict]
+        """
         response_length = micro_batch["responses"].size(-1)
-        batch_size = micro_batch["input_ids"].size(0)
-        attention_infos = [{} for _ in range(batch_size)]
+        attention_infos = [{} for _ in range(micro_batch["input_ids"].size(0))]
+        multi_modal_inputs = {}
+        if "multi_modal_inputs" in micro_batch.keys():
+            from verl.utils.model import extract_multi_modal_inputs
 
-        if "multi_modal_inputs" not in micro_batch.keys():
-            return attention_infos
-
-        from verl.utils.model import extract_multi_modal_inputs
-
-        multi_modal_inputs = extract_multi_modal_inputs(micro_batch["multi_modal_inputs"])
-        image_grid_thw = multi_modal_inputs.get("image_grid_thw")
-        if image_grid_thw is None:
-            return attention_infos
+            multi_modal_inputs = extract_multi_modal_inputs(micro_batch["multi_modal_inputs"])
 
         with torch.autocast(device_type=self.device_name, dtype=self.param_dtype):
             input_ids = micro_batch["input_ids"]
+            batch_size, seqlen = input_ids.shape
             attention_mask = micro_batch["attention_mask"]
             position_ids = micro_batch["position_ids"]
             response_mask = micro_batch.get("response_mask", attention_mask[:, -response_length:]).bool()
-
+            image_grid_thw = multi_modal_inputs.get("image_grid_thw")
+            if image_grid_thw is None:
+                return attention_infos
             if position_ids.dim() == 3:  # qwen2vl mrope
                 position_ids = position_ids.transpose(0, 1)  # (bsz, 4, seqlen) -> (4, bsz, seqlen)
-
-            prompt_length = input_ids.size(-1) - response_length
-            prompt_input_ids = input_ids[:, :prompt_length]
-            prompt_attention_mask = attention_mask[:, :prompt_length]
-            prompt_position_ids = position_ids[..., :prompt_length]
-            response_input_ids = input_ids[:, -response_length:]
-            response_position_ids = position_ids[..., -response_length:]
 
             actor_model = _unwrap_module(self.actor_module)
             model_config = getattr(actor_model, "config", None)
             image_token_id = getattr(model_config, "image_token_id", None)
             spatial_merge_size = getattr(getattr(model_config, "vision_config", None), "spatial_merge_size", 1)
-
             if image_token_id is None:
                 return attention_infos
 
-            prompt_output = self.actor_module(
-                input_ids=prompt_input_ids,
-                attention_mask=prompt_attention_mask,
-                position_ids=prompt_position_ids,
-                **multi_modal_inputs,
-                output_attentions=False,
-                return_dict=True,
-                use_cache=True,
-            )
-            with _temporary_attn_implementation(actor_model, "eager"):
-                response_output = self.actor_module(
-                    input_ids=response_input_ids,
-                    attention_mask=attention_mask,
-                    position_ids=response_position_ids,
-                    past_key_values=prompt_output.past_key_values,
-                    output_attentions=True,
-                    return_dict=True,
-                    use_cache=False,
-                )
+            if self.use_remove_padding:
+                prompt_length = input_ids.size(-1) - response_length
+                prompt_input_ids = input_ids[:, :prompt_length]
+                prompt_attention_mask = attention_mask[:, :prompt_length]
+                prompt_position_ids = position_ids[..., :prompt_length]
+                response_input_ids = input_ids[:, -response_length:]
+                response_attention_mask = attention_mask[:, -response_length:]
+                response_position_ids = position_ids[..., -response_length:]
 
-            if response_output.attentions is None:
-                return attention_infos
+                prompt_input_ids_rmpad, prompt_indices, prompt_cu_seqlens, *_ = unpad_input(
+                    prompt_input_ids.unsqueeze(-1), prompt_attention_mask
+                )  # prompt_input_ids_rmpad (total_nnz, ...)
+                prompt_input_ids_rmpad = prompt_input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
-            for sample_idx in range(batch_size):
-                sample_response_mask = response_mask[sample_idx]
-                if not torch.any(sample_response_mask):
-                    continue
+                # unpad the position_ids to align the rotary
+                if position_ids.dim() == 3:
+                    prompt_position_ids_rmpad = (
+                        index_first_axis(rearrange(prompt_position_ids, "c b s ... -> (b s) c ..."), prompt_indices)
+                        .transpose(0, 1)
+                        .unsqueeze(1)
+                    )  # (4, bsz, seqlen) -> (4, 1, bsz * seqlen)
+                else:
+                    prompt_position_ids_rmpad = index_first_axis(
+                        rearrange(prompt_position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), prompt_indices
+                    ).transpose(0, 1)
 
-                sample_image_grid_thw = micro_batch["multi_modal_inputs"][sample_idx].get("image_grid_thw")
-                if sample_image_grid_thw is None or sample_image_grid_thw.shape[0] == 0:
-                    continue
+                if "image_bound" in multi_modal_inputs:
+                    from verl.utils.dataset.vision_utils import process_multi_modal_inputs_for_minicpmo
 
-                grid_t = int(sample_image_grid_thw[0][0].item())
-                grid_h = int(sample_image_grid_thw[0][1].item()) // spatial_merge_size
-                grid_w = int(sample_image_grid_thw[0][2].item()) // spatial_merge_size
-                image_token_len = grid_t * grid_h * grid_w
+                    multi_modal_inputs = process_multi_modal_inputs_for_minicpmo(
+                        prompt_input_ids, prompt_attention_mask, prompt_position_ids, prompt_cu_seqlens, multi_modal_inputs
+                    )
 
-                sample_image_token_positions = torch.nonzero(input_ids[sample_idx] == image_token_id, as_tuple=False).squeeze(-1)
-                if sample_image_token_positions.numel() < image_token_len or image_token_len == 0:
-                    continue
+                response_input_ids_rmpad, response_indices, response_cu_seqlens, *_ = unpad_input(
+                    response_input_ids.unsqueeze(-1), response_attention_mask
+                )  # response_input_ids_rmpad (total_nnz, ...)
+                response_input_ids_rmpad = response_input_ids_rmpad.transpose(0, 1)  # (1, total_nnz)
 
-                sample_image_token_positions = sample_image_token_positions[:image_token_len]
-                sample_attentions = []
-                for layer_attention in response_output.attentions:
-                    sample_layer_attention = layer_attention[sample_idx].to(torch.float32)
-                    sample_layer_attention = sample_layer_attention[:, sample_response_mask, :]
-                    sample_layer_attention = sample_layer_attention[:, :, sample_image_token_positions]
-                    sample_attentions.append(sample_layer_attention)
+                # unpad the position_ids to align the rotary
+                if position_ids.dim() == 3:
+                    response_position_ids_rmpad = (
+                        index_first_axis(
+                            rearrange(response_position_ids, "c b s ... -> (b s) c ..."), response_indices
+                        )
+                        .transpose(0, 1)
+                        .unsqueeze(1)
+                    )  # (4, bsz, seqlen) -> (4, 1, bsz * seqlen)
+                else:
+                    response_position_ids_rmpad = index_first_axis(
+                        rearrange(response_position_ids.unsqueeze(-1), "b s ... -> (b s) ..."), response_indices
+                    ).transpose(0, 1)
 
-                sample_attentions = torch.stack(sample_attentions, dim=0)
-                sample_image_attention = sample_attentions.mean(dim=(0, 1, 2))
-                sample_image_attention = sample_image_attention.reshape(grid_t, grid_h, grid_w).mean(dim=0)
+                # pad and slice the inputs if sp > 1
+                if self.use_ulysses_sp:
+                    raise NotImplementedError("compute_attention does not support use_remove_padding with ulysses sp.")
 
-                attention_infos[sample_idx] = {
-                    "image_attention": sample_image_attention.detach().cpu().numpy(),
-                    "image_attention_grid_shape": (grid_h, grid_w),
-                }
+                # only pass input_ids and position_ids to enable flash_attn_varlen
+                extra_args = {}
+                if self.use_fused_kernels:
+                    extra_args["temperature"] = temperature
+                    extra_args["return_dict"] = True
+
+                prompt_output = self.actor_module(
+                    input_ids=prompt_input_ids_rmpad,
+                    attention_mask=None,
+                    position_ids=prompt_position_ids_rmpad,
+                    **multi_modal_inputs,
+                    use_cache=True,
+                    **extra_args,
+                )  # prevent model thinks we are generating
+
+                with _temporary_attn_implementation(actor_model, "eager"):
+                    response_output = self.actor_module(
+                        input_ids=response_input_ids_rmpad,
+                        attention_mask=None,
+                        position_ids=response_position_ids_rmpad,
+                        past_key_values=prompt_output.past_key_values,
+                        output_attentions=True,
+                        return_dict=True,
+                        use_cache=False,
+                    )  # prevent model thinks we are generating
+
+                if response_output.attentions is None:
+                    return attention_infos
+
+                prompt_valid_lengths = prompt_attention_mask.sum(dim=-1, dtype=torch.long)
+                response_valid_lengths = response_attention_mask.sum(dim=-1, dtype=torch.long)
+                full_valid_lengths = prompt_valid_lengths + response_valid_lengths
+                full_cu_seqlens = torch.zeros(batch_size + 1, dtype=torch.long, device=input_ids.device)
+                full_cu_seqlens[1:] = torch.cumsum(full_valid_lengths, dim=0)
+
+                # gather attention if sp > 1
+                if self.use_ulysses_sp:
+                    raise NotImplementedError("compute_attention does not support use_remove_padding with ulysses sp.")
+
+                # pad back to (bsz, seqlen)
+                for sample_idx in range(batch_size):
+                    sample_response_mask = response_mask[sample_idx][response_attention_mask[sample_idx].bool()]
+                    if not torch.any(sample_response_mask):
+                        continue
+
+                    sample_image_grid_thw = micro_batch["multi_modal_inputs"][sample_idx].get("image_grid_thw")
+                    if sample_image_grid_thw is None or sample_image_grid_thw.shape[0] == 0:
+                        continue
+
+                    grid_t = int(sample_image_grid_thw[0][0].item())
+                    grid_h = int(sample_image_grid_thw[0][1].item()) // spatial_merge_size
+                    grid_w = int(sample_image_grid_thw[0][2].item()) // spatial_merge_size
+                    image_token_len = grid_t * grid_h * grid_w
+
+                    sample_input_ids = input_ids[sample_idx][attention_mask[sample_idx].bool()]
+                    sample_image_token_positions = torch.nonzero(
+                        sample_input_ids == image_token_id, as_tuple=False
+                    ).squeeze(-1)
+                    if sample_image_token_positions.numel() < image_token_len or image_token_len == 0:
+                        continue
+
+                    sample_query_start = int(response_cu_seqlens[sample_idx].item())
+                    sample_query_end = int(response_cu_seqlens[sample_idx + 1].item())
+                    sample_image_token_positions = sample_image_token_positions[:image_token_len]
+                    sample_image_token_positions = sample_image_token_positions + int(full_cu_seqlens[sample_idx].item())
+
+                    sample_attentions = []
+                    for layer_attention in response_output.attentions:
+                        sample_layer_attention = layer_attention[0].to(torch.float32)
+                        sample_layer_attention = sample_layer_attention[:, sample_query_start:sample_query_end, :]
+                        sample_layer_attention = sample_layer_attention[:, sample_response_mask, :]
+                        sample_layer_attention = sample_layer_attention[:, :, sample_image_token_positions]
+                        sample_attentions.append(sample_layer_attention)
+
+                    sample_attentions = torch.stack(sample_attentions, dim=0)
+                    sample_image_attention = sample_attentions.mean(dim=(0, 1, 2))
+                    sample_image_attention = sample_image_attention.reshape(grid_t, grid_h, grid_w).mean(dim=0)
+
+                    attention_infos[sample_idx] = {
+                        "image_attention": sample_image_attention.detach().cpu().numpy(),
+                        "image_attention_grid_shape": (grid_h, grid_w),
+                    }
+
+            else:  # not using rmpad and no ulysses sp
+                prompt_length = input_ids.size(-1) - response_length
+                prompt_input_ids = input_ids[:, :prompt_length]
+                prompt_attention_mask = attention_mask[:, :prompt_length]
+                prompt_position_ids = position_ids[..., :prompt_length]
+                response_input_ids = input_ids[:, -response_length:]
+                response_position_ids = position_ids[..., -response_length:]
+
+                extra_args = {}
+                if self.use_fused_kernels:
+                    extra_args["temperature"] = temperature
+                    extra_args["return_dict"] = True
+
+                prompt_output = self.actor_module(
+                    input_ids=prompt_input_ids,
+                    attention_mask=prompt_attention_mask,
+                    position_ids=prompt_position_ids,
+                    **multi_modal_inputs,
+                    use_cache=True,
+                    **extra_args,
+                )  # prevent model thinks we are generating
+
+                with _temporary_attn_implementation(actor_model, "eager"):
+                    response_output = self.actor_module(
+                        input_ids=response_input_ids,
+                        attention_mask=attention_mask,
+                        position_ids=response_position_ids,
+                        past_key_values=prompt_output.past_key_values,
+                        output_attentions=True,
+                        return_dict=True,
+                        use_cache=False,
+                    )  # prevent model thinks we are generating
+
+                if response_output.attentions is None:
+                    return attention_infos
+
+                for sample_idx in range(batch_size):
+                    sample_response_mask = response_mask[sample_idx]
+                    if not torch.any(sample_response_mask):
+                        continue
+
+                    sample_image_grid_thw = micro_batch["multi_modal_inputs"][sample_idx].get("image_grid_thw")
+                    if sample_image_grid_thw is None or sample_image_grid_thw.shape[0] == 0:
+                        continue
+
+                    grid_t = int(sample_image_grid_thw[0][0].item())
+                    grid_h = int(sample_image_grid_thw[0][1].item()) // spatial_merge_size
+                    grid_w = int(sample_image_grid_thw[0][2].item()) // spatial_merge_size
+                    image_token_len = grid_t * grid_h * grid_w
+
+                    sample_image_token_positions = torch.nonzero(
+                        input_ids[sample_idx] == image_token_id, as_tuple=False
+                    ).squeeze(-1)
+                    if sample_image_token_positions.numel() < image_token_len or image_token_len == 0:
+                        continue
+
+                    sample_image_token_positions = sample_image_token_positions[:image_token_len]
+                    sample_attentions = []
+                    for layer_attention in response_output.attentions:
+                        sample_layer_attention = layer_attention[sample_idx].to(torch.float32)
+                        sample_layer_attention = sample_layer_attention[:, sample_response_mask, :]
+                        sample_layer_attention = sample_layer_attention[:, :, sample_image_token_positions]
+                        sample_attentions.append(sample_layer_attention)
+
+                    sample_attentions = torch.stack(sample_attentions, dim=0)
+                    sample_image_attention = sample_attentions.mean(dim=(0, 1, 2))
+                    sample_image_attention = sample_image_attention.reshape(grid_t, grid_h, grid_w).mean(dim=0)
+
+                    attention_infos[sample_idx] = {
+                        "image_attention": sample_image_attention.detach().cpu().numpy(),
+                        "image_attention_grid_shape": (grid_h, grid_w),
+                    }
 
         return attention_infos
 
@@ -512,9 +659,28 @@ class DataParallelPPOActor(BasePPOActor):
 
     @GPUMemoryLogger(role="dp actor", logger=logger)
     def compute_attention(self, data: DataProto) -> list[dict]:
+        """Compute the attention of the responses given input_ids, attention_mask and position_ids
+
+        Args:
+            data (DataProto): a DataProto containing keys
+
+                ``input_ids``: tensor of shape [batch_size, sequence_length]. torch.int64. Note that input_ids is the
+                concatenation of prompt and response. Note that ``sequence_length = prompt_length + response_length``.
+
+                ``attention_mask``: tensor of shape [batch_size, sequence_length]. torch.int64.
+
+                ``position_ids``: tensor of shape [batch_size, sequence_length]. torch.int64.
+
+                ``responses``:  tensor of shape [batch_size, response_length]. torch.int64.
+
+        Returns:
+            list[dict]: the attention info list
+        """
+        # set to eval
         self.actor_module.eval()
 
         micro_batch_size = data.meta_info["micro_batch_size"]
+        temperature = data.meta_info["temperature"]  # temperature must be in the data.meta_info to avoid silent error
         use_dynamic_bsz = data.meta_info["use_dynamic_bsz"]
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         has_response_mask = "response_mask" in data.batch.keys()
@@ -531,13 +697,17 @@ class DataParallelPPOActor(BasePPOActor):
         else:
             micro_batches = data.split(micro_batch_size)
 
-        attention_infos = []
+        attention_infos_lst = []
         for micro_batch in micro_batches:
             micro_batch = micro_batch.to(get_device_id())
             model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
             with torch.no_grad():
-                micro_batch_attention_infos = self._forward_micro_batch_attention(model_inputs)
-            attention_infos.extend(micro_batch_attention_infos)
+                attention_infos = self._forward_micro_batch_attention(
+                    model_inputs, temperature=temperature
+                )
+            attention_infos_lst.append(attention_infos)
+
+        attention_infos = list(chain.from_iterable(attention_infos_lst))
 
         if use_dynamic_bsz:
             indices = list(chain.from_iterable(batch_idx_list))
