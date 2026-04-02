@@ -640,7 +640,11 @@ class RayPPOTrainer:
             if self.val_reward_fn is None:
                 raise ValueError("val_reward_fn must be provided for validation.")
             if self._should_compute_reward_attention(test_batch):
-                attention = self.actor_rollout_wg.compute_attention(test_batch)
+                # Match validation generation behavior so the last validation batch
+                # can still be dispatched across all data-parallel workers.
+                test_batch_padded, attention_pad_size = pad_dataproto_to_divisor(test_batch, size_divisor)
+                attention_padded = self.actor_rollout_wg.compute_attention(test_batch_padded)
+                attention = unpad_dataproto(attention_padded, pad_size=attention_pad_size)
                 self._merge_attention_into_extra_info(test_batch, attention)
             result = self.val_reward_fn(test_batch, return_dict=True)
             reward_tensor = result["reward_tensor"]
