@@ -17,11 +17,12 @@ ATTENTION_METRIC_KEYS = (
 
 LAYERED_ATTENTION_METRIC_KEY_PREFIXES = (
     "image_attention_sum/layer_",
-    "image_attention_per_token/layer_",
-    "bbox_attention_sum/layer_",
-    "bbox_attention_sum_over_image_attention_sum/layer_",
-    "bbox_attention_per_token/layer_",
     "bbox_attention_per_token_over_image_attention_per_token/layer_",
+)
+
+LAYERED_ATTENTION_LOG_KEYS = (
+    "image_attention_sum",
+    "bbox_attention_per_token_over_image_attention_per_token",
 )
 
 
@@ -175,14 +176,7 @@ def get_layered_attention_metrics(extra_info: dict, ground_truth: dict[str, floa
         layered_attention_metrics = {}
         for layer_idx, layer_attention in enumerate(image_attention_by_layer):
             layer_metrics = compute_attention_metrics(layer_attention, ground_truth)
-            for key in (
-                "image_attention_sum",
-                "image_attention_per_token",
-                "bbox_attention_sum",
-                "bbox_attention_sum_over_image_attention_sum",
-                "bbox_attention_per_token",
-                "bbox_attention_per_token_over_image_attention_per_token",
-            ):
+            for key in LAYERED_ATTENTION_LOG_KEYS:
                 layered_attention_metrics[f"{key}/layer_{layer_idx:02d}"] = float(layer_metrics[key])
         return layered_attention_metrics
 
