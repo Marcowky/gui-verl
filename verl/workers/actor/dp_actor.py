@@ -177,7 +177,9 @@ class DataParallelPPOActor(BasePPOActor):
             extra_args = {}
             if self.use_fused_kernels:
                 extra_args["temperature"] = temperature
-                extra_args["return_dict"] = True
+            extra_args["return_dict"] = True
+            extra_args["compute_log_probs"] = False
+            extra_args["compute_entropy"] = False
 
             prompt_output = self.actor_module(
                 input_ids=prompt_prefix_input_ids,
@@ -195,8 +197,8 @@ class DataParallelPPOActor(BasePPOActor):
                     position_ids=shifted_position_ids,
                     past_key_values=prompt_output.past_key_values,
                     output_attentions=True,
-                    return_dict=True,
                     use_cache=False,
+                    **extra_args,
                 )  # prevent model thinks we are generating
 
             if response_output.attentions is None:

@@ -256,6 +256,8 @@ def forward_with_normal_backend(
     input_ids: torch.LongTensor = None,
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
+    compute_log_probs: bool = True,
+    compute_entropy: bool = True,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
     outputs = self.model(input_ids, **kwargs)
@@ -275,6 +277,8 @@ def forward_with_torch_backend(
     input_ids: torch.LongTensor = None,
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
+    compute_log_probs: bool = True,
+    compute_entropy: bool = True,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
     from verl.utils.experimental.torch_functional import FusedLinearForPPO
@@ -282,21 +286,28 @@ def forward_with_torch_backend(
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
 
-    # Loss calculations
-    if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
-    elif input_ids is not None:
-        rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
-    else:
-        raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
+    log_probs = None
+    entropy = None
+    if compute_log_probs or compute_entropy:
+        if labels is not None:
+            rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
+        elif input_ids is not None:
+            rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
+        else:
+            raise RuntimeError("To use forward_with_torch_backend, either labels or input_ids must be provided.")
 
-    fused_linear_for_ppo = FusedLinearForPPO()
-    log_probs, entropy = fused_linear_for_ppo.forward(
-        hidden_states=hidden_states,
-        vocab_weights=self.lm_head.weight,
-        input_ids=rolled_labels,
-        temperature=temperature,
-    )
+        fused_linear_for_ppo = FusedLinearForPPO()
+        log_probs, entropy = fused_linear_for_ppo.forward(
+            hidden_states=hidden_states,
+            vocab_weights=self.lm_head.weight,
+            input_ids=rolled_labels,
+            temperature=temperature,
+        )
+        if not compute_log_probs:
+            log_probs = None
+        if not compute_entropy:
+            entropy = None
+
     return Qwen3VLCausalLMOutputForPPO(
         log_probs=log_probs,
         entropy=entropy,
@@ -311,6 +322,8 @@ def forward_with_triton_backend(
     input_ids: torch.LongTensor = None,
     labels: Optional[torch.LongTensor] = None,
     temperature: float = 1.0,
+    compute_log_probs: bool = True,
+    compute_entropy: bool = True,
     **kwargs,
 ) -> "Qwen3VLCausalLMOutputForPPO":
     from verl.utils.kernel.linear_cross_entropy import linear_cross_entropy
@@ -318,21 +331,28 @@ def forward_with_triton_backend(
     outputs = self.model(input_ids, **kwargs)
     hidden_states = outputs[0]
 
-    # Loss calculations
-    if labels is not None:
-        rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
-    elif input_ids is not None:
-        rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
-    else:
-        raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
+    log_probs = None
+    entropy = None
+    if compute_log_probs or compute_entropy:
+        if labels is not None:
+            rolled_labels = torch.roll(labels, shifts=-1, dims=-1)
+        elif input_ids is not None:
+            rolled_labels = torch.roll(input_ids, shifts=-1, dims=-1)
+        else:
+            raise RuntimeError("To use forward_with_triton_backend, either labels or input_ids must be provided.")
 
-    log_probs, entropy = linear_cross_entropy(
-        hidden_states,
-        self.lm_head.weight,
-        rolled_labels,
-        temperature,
-        "none",
-    )
+        log_probs, entropy = linear_cross_entropy(
+            hidden_states,
+            self.lm_head.weight,
+            rolled_labels,
+            temperature,
+            "none",
+        )
+        if not compute_log_probs:
+            log_probs = None
+        if not compute_entropy:
+            entropy = None
+
     return Qwen3VLCausalLMOutputForPPO(
         log_probs=log_probs,
         entropy=entropy,
