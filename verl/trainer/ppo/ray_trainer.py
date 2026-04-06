@@ -52,6 +52,12 @@ from verl.trainer.ppo.metric_utils import (
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
+from verl.utils.checkpoint.artifact_manager import (
+    export_actor_weight_artifact,
+    get_actor_artifact_kind,
+    get_actor_dir,
+    write_actor_artifact_metadata,
+)
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
@@ -330,6 +336,7 @@ class RayPPOTrainer:
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
         )
+        self.actor_artifact_backend = self._resolve_actor_artifact_backend()
         self.best_ckpt_dir = os.path.join(self.config.trainer.default_local_dir, "best_checkpoints")
         self.best_ckpt_metadata_path = os.path.join(self.best_ckpt_dir, "metadata.json")
         self.best_ckpt_records = self._load_best_checkpoint_metadata()
@@ -346,6 +353,36 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
+
+    def _resolve_actor_artifact_backend(self) -> str | None:
+        strategy = self.config.actor_rollout_ref.actor.get("strategy", None)
+        if strategy in {"fsdp", "fsdp2"}:
+            return "fsdp"
+        return None
+
+    def _convert_actor_checkpoint_to_weight(self, source_actor_dir: str, target_actor_dir: str) -> None:
+        if self.actor_artifact_backend != "fsdp":
+            raise NotImplementedError(
+                "Actor weight-only export is currently implemented for FSDP actor checkpoints only"
+            )
+
+        from verl.model_merger.base_model_merger import ModelMergerConfig
+        from verl.model_merger.fsdp_model_merger import FSDPModelMerger
+
+        os.makedirs(target_actor_dir, exist_ok=True)
+        config = ModelMergerConfig(
+            operation="merge",
+            backend="fsdp",
+            target_dir=target_actor_dir,
+            local_dir=source_actor_dir,
+            trust_remote_code=self.config.actor_rollout_ref.model.get("trust_remote_code", False),
+            hf_model_config_path=os.path.join(source_actor_dir, "huggingface"),
+        )
+        merger = FSDPModelMerger(config)
+        try:
+            merger.merge_and_save()
+        finally:
+            merger.cleanup()
 
     def _create_dataloader(self, train_dataset, val_dataset, collate_fn, train_sampler: Optional[Sampler]):
         """
@@ -847,6 +884,11 @@ class RayPPOTrainer:
         self.actor_rollout_wg.save_checkpoint(
             actor_local_path, actor_remote_path, self.global_steps, max_ckpt_to_keep=max_actor_ckpt_to_keep
         )
+        write_actor_artifact_metadata(
+            actor_local_path,
+            kind="checkpoint",
+            backend=self.actor_artifact_backend,
+        )
 
         if self.use_critic:
             critic_local_path = os.path.join(local_global_step_folder, str(Role.Critic))
@@ -963,14 +1005,25 @@ class RayPPOTrainer:
             return
 
         source_path = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
-        if not os.path.exists(source_path):
-            raise FileNotFoundError(f"Checkpoint source path does not exist: {source_path}")
+        source_actor_path = get_actor_dir(source_path)
+        if not os.path.exists(source_actor_path):
+            raise FileNotFoundError(f"Checkpoint source path does not exist: {source_actor_path}")
 
         os.makedirs(self.best_ckpt_dir, exist_ok=True)
         destination_path = os.path.join(self.best_ckpt_dir, f"global_step_{self.global_steps}")
         if os.path.exists(destination_path):
             shutil.rmtree(destination_path, ignore_errors=True)
-        shutil.copytree(source_path, destination_path)
+
+        if self.actor_artifact_backend is None:
+            shutil.copytree(source_path, destination_path)
+        else:
+            destination_actor_path = get_actor_dir(destination_path)
+            export_actor_weight_artifact(
+                source_actor_dir=source_actor_path,
+                target_actor_dir=destination_actor_path,
+                converter=self._convert_actor_checkpoint_to_weight,
+                backend=self.actor_artifact_backend,
+            )
 
         self.best_ckpt_records = [record for record in self.best_ckpt_records if record["step"] != self.global_steps]
         self.best_ckpt_records.append(
@@ -1059,6 +1112,11 @@ class RayPPOTrainer:
         print(f"Resuming from {global_step_folder}")
 
         actor_path = os.path.join(global_step_folder, "actor")
+        if get_actor_artifact_kind(actor_path) == "weight":
+            raise ValueError(
+                f"Cannot resume training from weight-only actor artifact: {actor_path}. "
+                "Please resume from the latest full checkpoint instead."
+            )
         critic_path = os.path.join(global_step_folder, str(Role.Critic))
         # load actor
         self.actor_rollout_wg.load_checkpoint(
